@@ -11,21 +11,40 @@ import           Data.Char
 import           Data.List
 -- }}}
 --  +--------------------------------------------------+
---  |             Types for error tracking             |
+--  |             Input class and helpers              |
 --  +--------------------------------------------------+
 --{{{
-
+-- Wrapper for input text
 data Input = Input {
              line :: !Int,
              col  :: !Int,
              rest :: !String
              } deriving (Show, Eq)
 
+
+-- Move input to next character, track col/line position
+incr :: Input -> Input
+incr (Input l c []) = Input 0 0 ""
+incr (Input l c a) = case head a == '\n' of
+                       True  -> Input (l + 1) 0 (tail a)
+                       False -> Input l (c + 1) (tail a)
+
+-- Helper function for testing
+fromstr :: String -> Input
+fromstr = Input 0 0
+-- }}}
+--  +--------------------------------------------------+
+--  |             Types for error tracking             |
+--  +--------------------------------------------------+
+-- {{{
+
+-- Different message types for different types of errors
 data Message = Expected !String
              | Unexpected !String
              | Primative !String
              | Message !String
 
+-- How to print each message 
 instance Show Message where
     -- add new instance for each message type
     show (Expected s)   = "when attempting to parse " ++ s ++ "\n"
@@ -33,27 +52,22 @@ instance Show Message where
     show (Primative s)  = "Unexpected '" ++ s ++ "' "
     show (Message s)    = s ++ "\n"
 
+-- Error type; Currently only has ParseError but will encapsulate more (i.e., conflicting types,
+-- no function exists, etc.)
 data LYError = ParseError Int Int [Message]
 
 instance Show LYError where
     -- add new instance for each type of error!
     show (ParseError l c msgs) =
-        ("\n**ParseError** at position " ++ show l ++ ":" ++ show c ++ "\n") ++ (concat $ map (\msg ->  (show msg)) msgs)
+        ("\n**ParseError** at position " ++ show l ++ ":" ++ show c ++ "\n") ++ (concat $ map (\msg ->  (show msg)) (reverse msgs))
 
+-- Appends an error message to the error
 add_msg :: LYError -> Message -> LYError
-add_msg (ParseError l c msgs) msg = ParseError l c (msgs ++ [msg])
+add_msg (ParseError l c msgs) msg = ParseError l c (msg:msgs)
 
+-- Checks if there are any error messages
 is_unknown :: LYError -> Bool
 is_unknown (ParseError _ _ msgs) = null msgs
-
-incr :: Input -> Input
-incr (Input l c []) = Input 0 0 ""
-incr (Input l c a) = case head a == '\n' of
-                       True  -> Input (l + 1) 0 (tail a)
-                       False -> Input l (c + 1) (tail a)
-
-fromstr :: String -> Input
-fromstr = Input 0 0
 
 --}}}
 --  +--------------------------------------------------+
