@@ -21,13 +21,6 @@ data Input = Input {
              rest :: !String
              } deriving (Show, Eq)
 
-data LYError = ParseError Int Int [Message]
-
-instance Show LYError where
-    -- add new instance for each type of error!
-    show (ParseError l c msgs) =
-        ("\n**ParseError** at position " ++ show l ++ ":" ++ show c ++ "\n") ++ (concat $ map (\msg ->  (show msg)) msgs)
-
 data Message = Expected !String
              | Unexpected !String
              | Primative !String
@@ -35,14 +28,17 @@ data Message = Expected !String
 
 instance Show Message where
     -- add new instance for each message type
-    show (Expected s)   = "\tin attempt to parse " ++ s ++ "\n"
-    show (Unexpected s) = "Unexpected '" ++ s ++ "'\n"
-    show (Primative s)  = "Unexpected '" ++ s ++ "'\n"
+    show (Expected s)   = "when attempting to parse " ++ s ++ "\n"
+    show (Unexpected s) = "Unexpected '" ++ s ++ "' "
+    show (Primative s)  = "Unexpected '" ++ s ++ "' "
     show (Message s)    = s ++ "\n"
 
--- ease of use constructor
-parseerr :: Int -> Int -> Message -> LYError
-parseerr l c msg = ParseError l c [msg]
+data LYError = ParseError Int Int [Message]
+
+instance Show LYError where
+    -- add new instance for each type of error!
+    show (ParseError l c msgs) =
+        ("\n**ParseError** at position " ++ show l ++ ":" ++ show c ++ "\n") ++ (concat $ map (\msg ->  (show msg)) msgs)
 
 add_msg :: LYError -> Message -> LYError
 add_msg (ParseError l c msgs) msg = ParseError l c (msgs ++ [msg])
@@ -50,11 +46,11 @@ add_msg (ParseError l c msgs) msg = ParseError l c (msgs ++ [msg])
 is_unknown :: LYError -> Bool
 is_unknown (ParseError _ _ msgs) = null msgs
 
-
 incr :: Input -> Input
-incr inp@(Input l c a) = case head a == '\n' of
-                               True  -> Input (l + 1) 0 (tail a)
-                               False -> Input l (c + 1) (tail a)
+incr (Input l c []) = Input 0 0 ""
+incr (Input l c a) = case head a == '\n' of
+                       True  -> Input (l + 1) 0 (tail a)
+                       False -> Input l (c + 1) (tail a)
 
 fromstr :: String -> Input
 fromstr = Input 0 0
@@ -81,7 +77,7 @@ instance Applicative Parser where
                               Right (inp', f) -> parse (f <$> q) inp'
 
 instance Alternative Parser where
-  empty = Parser $ \inp@(Input l c r) -> Left (parseerr l c (Primative [head r]))
+  empty = Parser $ \inp@(Input l c r) -> Left (ParseError l c [Primative [head r]])
   p <|> q = Parser $ \inp -> case parse p inp of
                               Left e          -> parse q inp
                               Right (inp', a) -> Right (inp', a)
@@ -116,9 +112,9 @@ sat f = Parser $ g
 
 
 -- Attempts to parse with p, returns default value v otherwise
-perhaps :: Parser a -> a -> Parser a
-perhaps p v = Parser $ \inp -> case parse p inp of
-                                Left e  -> Left e
+optional :: Parser a -> a -> Parser a
+optional p v = Parser $ \inp -> case parse p inp of
+                                Left e  -> Right (inp, v)
                                 Right r -> Right r
 
 -- Parse while function is satisfied
@@ -139,23 +135,22 @@ char ch = sat (==ch) <?> show ch
 string :: String -> Parser String
 string s = (sequenceA $ map char s) <?> show s
 
-
 digit :: Parser Char
-digit = sat isDigit <?> "a digit"
+digit = sat isDigit
 
 alpha :: Parser Char
-alpha = sat isAlpha <?> "a letter"
+alpha = sat isAlpha
 
 alnum :: Parser Char
-alnum = sat isAlphaNum <?> "a digit or letter"
+alnum = sat isAlphaNum
 
 space :: Parser Char
-space = sat isSpace <?> "a space"
+space = sat isSpace
 
 spaces :: Parser String
 spaces = many space
 
 identifier :: Parser String
-identifier = ((:) <$> alpha <*> many alnum) <?> "an identifier"
+identifier = ((:) <$> alpha <*> many alnum) <?> "an identifier."
 -- }}}
 
