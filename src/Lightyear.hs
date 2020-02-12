@@ -8,28 +8,57 @@ module Lightyear
 import           Control.Applicative
 import           Control.Monad
 import           Data.Char
+import           Data.List
 -- }}}
 --  +--------------------------------------------------+
---  |          Input type for error tracking           |
+--  |             Types for error tracking             |
 --  +--------------------------------------------------+
 --{{{
+
 data Input = Input {
-             rest :: !String,
              line :: !Int,
-             col  :: !Int
+             col  :: !Int,
+             rest :: !String
              } deriving (Show, Eq)
 
+data LYError = ParseError Int Int [Message]
+
+instance Show LYError where
+    -- add new instance for each type of error!
+    show (ParseError l c msgs) =
+        ("\n**ParseError** at position " ++ show l ++ ":" ++ show c ++ "\n") ++ (concat $ map (\msg ->  (show msg)) msgs)
+
+data Message = Expected !String
+             | Unexpected !String
+             | Primative !String
+             | Message !String
+
+instance Show Message where
+    -- add new instance for each message type
+    show (Expected s)   = "\tin attempt to parse " ++ s ++ "\n"
+    show (Unexpected s) = "Unexpected '" ++ s ++ "'\n"
+    show (Primative s)  = "Unexpected '" ++ s ++ "'\n"
+    show (Message s)    = s ++ "\n"
+
+-- ease of use constructor
+parseerr :: Int -> Int -> Message -> LYError
+parseerr l c msg = ParseError l c [msg]
+
+add_msg :: LYError -> Message -> LYError
+add_msg (ParseError l c msgs) msg = ParseError l c (msgs ++ [msg])
+
+is_unknown :: LYError -> Bool
+is_unknown (ParseError _ _ msgs) = null msgs
+
+
 incr :: Input -> Input
-incr inp = case h of 
-               '\n' -> Input t (l + 1) 0
-               _    -> Input t l (c + 1)
-    where h = head $ rest inp
-          t = tail $ rest inp
-          l = line inp 
-          c = col inp 
+incr inp@(Input l c a) = case head a == '\n' of
+                               True  -> Input (l + 1) 0 (tail a)
+                               False -> Input l (c + 1) (tail a)
 
 fromstr :: String -> Input
-fromstr s = Input s 0 0
+fromstr = Input 0 0
+
 --}}}
 --  +--------------------------------------------------+
 --  |       Parser type and typeclass instances        |
@@ -37,48 +66,60 @@ fromstr s = Input s 0 0
 -- {{{
 
 newtype Parser a = Parser {
-    parse :: Input -> (Input, Maybe a)
+    parse :: Input -> Either LYError (Input, a)
 }
 
 instance Functor Parser where
   fmap f p = Parser $ \inp -> case parse p inp of
-                                (inp', Just x) -> (inp', Just $ f x)
-                                (_, Nothing)   -> (inp, Nothing)
+                                Left e          -> Left e
+                                Right (inp', a) -> Right (inp', f a)
 
 instance Applicative Parser where
-  pure x = Parser $ \inp -> (inp, Just x)
-  p <*> q = Parser $ \inp -> do
-                    case parse p inp of
-                      (_, Nothing)   -> (inp, Nothing)
-                      (inp', Just f) -> parse (f <$> q) inp'
+  pure x = Parser $ \inp -> Right (inp, x)
+  p <*> q = Parser $ \inp -> case parse p inp of
+                              Left e          -> Left e
+                              Right (inp', f) -> parse (f <$> q) inp'
 
 instance Alternative Parser where
-  empty = Parser $ \inp -> (inp, Nothing)
+  empty = Parser $ \inp@(Input l c r) -> Left (parseerr l c (Primative [head r]))
   p <|> q = Parser $ \inp -> case parse p inp of
-                               (inp', Just x) -> (inp', Just x)
-                               (_, Nothing)   -> parse q inp
+                              Left e          -> parse q inp
+                              Right (inp', a) -> Right (inp', a)
 
 instance Monad Parser where
     p >>= f = Parser $ \inp -> case parse p inp of
-                            (_, Nothing)   -> (inp, Nothing)
-                            (inp', Just a) -> parse (f a) inp'
+                                Left e          -> Left e
+                                Right (inp', a) -> parse (f a) inp'
 -- }}}
 --  +--------------------------------------------------+
 --  |                 Helper functions                 |
 --  +--------------------------------------------------+
 -- {{{
+
+-- Adds an error message to the parser if it fails
+(<?>) :: Parser a -> String -> Parser a
+p <?> s = Parser $ \inp@(Input l c a) ->
+                        case parse p inp of
+                         Right r -> Right r
+                         Left err -> case is_unknown err of
+                                       True  -> Left $ ParseError l c [Expected s]
+                                       False -> Left $ add_msg err (Expected s)
+
+
 -- If char satisfies input function, parse, otherwise Nothing
 sat :: (Char -> Bool) -> Parser Char
 sat f = Parser $ g
-    where g inp = if (f h) then (incr inp, Just h) else (inp, Nothing)
-                           where h = head $ rest inp 
+    where g (Input l c []) = Left $ ParseError l c [Primative "end of file"]
+          g inp@(Input l c a) = case f $ head a of
+                                 True -> Right (incr inp, head a)
+                                 False -> Left $ ParseError l c [Primative [head a]]
 
 
 -- Attempts to parse with p, returns default value v otherwise
 perhaps :: Parser a -> a -> Parser a
 perhaps p v = Parser $ \inp -> case parse p inp of
-                                 (inp', Just v') -> (inp', Just v')
-                                 (_, Nothing)         -> (inp, Nothing)
+                                Left e  -> Left e
+                                Right r -> Right r
 
 -- Parse while function is satisfied
 whilef :: (Char -> Bool) -> Parser String
@@ -93,38 +134,28 @@ untilf f = whilef (\x -> not $ f x)
 --  +--------------------------------------------------+
 -- {{{
 char :: Char -> Parser Char
-char c = Parser $ g
-        where h = head . rest
-              g inp = if c == h inp 
-                         then (incr inp, Just c) 
-                         else (inp, Nothing)
-               
+char ch = sat (==ch) <?> show ch
 
 string :: String -> Parser String
-string s = sequenceA $ map char s
---string [] = return []
---string (h:t) = Parser $ \inp -> 
---    case parse (char h) inp of
---      (inp', Just c) -> parse (string t) inp'
---      (inp, Nothing) -> (inp, Nothing)
+string s = (sequenceA $ map char s) <?> show s
 
 
 digit :: Parser Char
-digit = sat isDigit
+digit = sat isDigit <?> "a digit"
 
 alpha :: Parser Char
-alpha = sat isAlpha
+alpha = sat isAlpha <?> "a letter"
 
 alnum :: Parser Char
-alnum = sat isAlphaNum
+alnum = sat isAlphaNum <?> "a digit or letter"
 
 space :: Parser Char
-space = sat isSpace
+space = sat isSpace <?> "a space"
 
 spaces :: Parser String
 spaces = many space
 
 identifier :: Parser String
-identifier = (:) <$> alpha <*> many alnum
+identifier = ((:) <$> alpha <*> many alnum) <?> "an identifier"
 -- }}}
 
