@@ -16,6 +16,7 @@ import           Data.List
 --{{{
 -- Wrapper for input text
 data Input = Input {
+             current :: !String,
              line :: !Int,
              col  :: !Int,
              rest :: !String
@@ -24,50 +25,108 @@ data Input = Input {
 
 -- Move input to next character, track col/line position
 incr :: Input -> Input
-incr (Input l c []) = Input 0 0 ""
-incr (Input l c a) = case head a == '\n' of
-                       True  -> Input (l + 1) 0 (tail a)
-                       False -> Input l (c + 1) (tail a)
+incr (Input s l c []) = Input s 0 0 ""
+incr (Input s l c a) = case head a == '\n' of
+                        True  -> Input cline (l + 1) 0 (tail a)
+                        False -> Input s l (c + 1) (tail a)
+   where cline = takeWhile (/= '\n') (tail a)
 
 -- Helper function for testing
 fromstr :: String -> Input
-fromstr = Input 0 0
+fromstr s = Input s 0 0 s
 -- }}}
 --  +--------------------------------------------------+
 --  |             Types for error tracking             |
 --  +--------------------------------------------------+
 -- {{{
 
--- Different message types for different types of errors
-data Message = Expected !String
-             | Unexpected !String
-             | Primative !String
-             | Message !String
+data Message = Unexpected !String
+             | Primitive !String
+             | Expected !String
+             | General !String
 
--- How to print each message 
+-- For comparison 
+instance Enum Message where
+    fromEnum (Unexpected _) = 0
+    fromEnum (Primitive  _) = 1
+    fromEnum (Expected   _) = 2
+    fromEnum (General    _) = 3
+    toEnum _ = error "toEnum not defined for Message"
+
+instance Eq Message where
+    a == b = (fromEnum a) == (fromEnum b)
+
+-- Extract strings inside each Message
 instance Show Message where
-    -- add new instance for each message type
-    show (Expected s)   = "when attempting to parse " ++ s ++ "\n"
-    show (Unexpected s) = "Unexpected '" ++ s ++ "' "
-    show (Primative s)  = "Unexpected '" ++ s ++ "' "
-    show (Message s)    = s ++ "\n"
+    show (Unexpected s) = s
+    show (Primitive  s) = s
+    show (Expected   s) = s
+    show (General    s) = s
 
 -- Error type; Currently only has ParseError but will encapsulate more (i.e., conflicting types,
 -- no function exists, etc.)
-data LYError = ParseError Int Int [Message]
+data LYError = ParseError String Int Int [Message]
 
-instance Show LYError where
+instance Show LYError where-- {{{
     -- add new instance for each type of error!
-    show (ParseError l c msgs) =
-        ("\n**ParseError** at position " ++ show l ++ ":" ++ show c ++ "\n") ++ (concat $ map (\msg ->  (show msg)) (reverse msgs))
+    show (ParseError s l c msgs) =
+        ("parse error at position " 
+        ++ show l ++ ":" ++ show c ++ "\n")
+        ++ '\n': line ++ '\n':uline 
+        ++ (concat $ map (' ':) $ clean $ [show_prims, show_unexp, show_exp, show_gen])
+        where line   = show l ++ " | " ++ takeWhile (/= '\n') s
+              uline  = (replicate (c + 3 + (length $ show l)) ' ') ++ "^" 
+              prims   = filter ((Primitive "")  ==) msgs
+              unexps  = filter ((Unexpected "") ==) msgs
+              exps    = filter ((Expected "")   ==) msgs
+              gens    = filter ((General "")    ==) msgs
+              show_prims | not (null unexps) ||
+                           null prims = ""
+                         | otherwise  = "\n<!> unexpected " ++ (show $ head prims)
+              show_unexp = show_msgs "\n<!> unexpected" unexps
+              show_exp   = show_msgs "\n<?> when looking for" exps
+              show_gen   = show_msgs "" gens 
+
+-- Error printing helper functions {{{
+              show_msgs :: String -> [Message] -> String
+              show_msgs prefix [] = ""
+              show_msgs prefix [m] = prefix ++ ' ' : show m
+              show_msgs prefix [m,n] = prefix ++ ' ' : show m ++ " or " ++ show n
+              show_msgs prefix ms = prefix ++ " one of: " ++ (newlines all)
+                  where all = clean $ map show ms 
+              newlines :: [String] -> String
+              newlines ls = intercalate "\n\t- " ("":ls)
+              commas :: [String] -> String
+              commas ls = intercalate ", " ls
+              clean :: [String] -> [String]
+              clean = nub . filter (not . null)
+-- }}}
+
+-- }}}
+
 
 -- Appends an error message to the error
 add_msg :: LYError -> Message -> LYError
-add_msg (ParseError l c msgs) msg = ParseError l c (msg:msgs)
+add_msg (ParseError s l c msgs) msg = ParseError s l c (msg:msgs)
+
+cmp_pair :: (Int, Int) -> (Int, Int) -> Int
+cmp_pair (a,b) (c,d)
+    | a > c = 1
+    | c > a = -1
+    | b > d = 1
+    | d < b = -1
+    | otherwise = 0
+
+merge_errs :: LYError -> LYError -> LYError
+merge_errs e@(ParseError s l c msgs) e'@(ParseError s' l' c' msgs') = 
+    case cmp_pair (l,c) (l',c') of 
+      0  -> ParseError s l c (msgs ++ msgs')
+      1  -> ParseError s l c msgs
+      -1 -> ParseError s' l' c' msgs'
 
 -- Checks if there are any error messages
 is_unknown :: LYError -> Bool
-is_unknown (ParseError _ _ msgs) = null msgs
+is_unknown (ParseError _ _ _ msgs) = null $ tail msgs
 
 --}}}
 --  +--------------------------------------------------+
@@ -91,10 +150,12 @@ instance Applicative Parser where
                               Right (inp', f) -> parse (f <$> q) inp'
 
 instance Alternative Parser where
-  empty = Parser $ \inp@(Input l c r) -> Left (ParseError l c [Primative [head r]])
+  empty = Parser $ \inp@(Input s l c r) -> Left (ParseError s l c [Primitive $ show $ head r])
   p <|> q = Parser $ \inp -> case parse p inp of
-                              Left e          -> parse q inp
-                              Right (inp', a) -> Right (inp', a)
+                              Right r -> Right r
+                              Left e  -> case parse q inp of
+                                          Right r -> Right r
+                                          Left e' -> Left (merge_errs e e')
 
 instance Monad Parser where
     p >>= f = Parser $ \inp -> case parse p inp of
@@ -108,21 +169,20 @@ instance Monad Parser where
 
 -- Adds an error message to the parser if it fails
 (<?>) :: Parser a -> String -> Parser a
-p <?> s = Parser $ \inp@(Input l c a) ->
-                        case parse p inp of
-                         Right r -> Right r
-                         Left err -> case is_unknown err of
-                                       True  -> Left $ ParseError l c [Expected s]
-                                       False -> Left $ add_msg err (Expected s)
+p <?> m = Parser $ \inp@(Input s l c a) ->
+            case parse p inp of
+             Right r  -> Right r
+             Left (ParseError s l c msgs)  -> Left $ 
+                 ParseError s l c $ Expected m : filter ((Expected "") /=) msgs
 
 
 -- If char satisfies input function, parse, otherwise Nothing
 sat :: (Char -> Bool) -> Parser Char
 sat f = Parser $ g
-    where g (Input l c []) = Left $ ParseError l c [Primative "end of file"]
-          g inp@(Input l c a) = case f $ head a of
+    where g (Input s l c []) = Left $ ParseError s l c [Primitive "'end-of-file'"]
+          g inp@(Input s l c a) = case f $ head a of
                                  True -> Right (incr inp, head a)
-                                 False -> Left $ ParseError l c [Primative [head a]]
+                                 False -> Left $ ParseError s l c [Primitive $ show $ head a]
 
 
 -- Attempts to parse with p, returns default value v otherwise
@@ -144,7 +204,7 @@ untilf f = whilef (\x -> not $ f x)
 --  +--------------------------------------------------+
 -- {{{
 char :: Char -> Parser Char
-char ch = sat (==ch) <?> show ch
+char ch = sat (==ch) 
 
 string :: String -> Parser String
 string s = (sequenceA $ map char s) <?> show s
@@ -156,7 +216,7 @@ alpha :: Parser Char
 alpha = sat isAlpha
 
 alnum :: Parser Char
-alnum = sat isAlphaNum
+alnum = sat isAlphaNum <?> "an alpha-numeric"
 
 space :: Parser Char
 space = sat isSpace
@@ -164,7 +224,7 @@ space = sat isSpace
 spaces :: Parser String
 spaces = many space
 
-identifier :: Parser String
-identifier = ((:) <$> alpha <*> many alnum) <?> "an identifier."
+name :: Parser String
+name = ((:) <$> alpha <*> many alnum) <?> "an identifier."
 -- }}}
 
