@@ -114,7 +114,7 @@ cmp_pair (a,b) (c,d)
     | a > c = 1
     | c > a = -1
     | b > d = 1
-    | d < b = -1
+    | d > b = -1
     | otherwise = 0
 
 merge_errs :: LYError -> LYError -> LYError
@@ -151,16 +151,19 @@ instance Applicative Parser where
 
 instance Alternative Parser where
   empty = Parser $ \inp@(Input s l c r) -> Left (ParseError s l c [Primitive $ show $ head r])
-  p <|> q = Parser $ \inp -> case parse p inp of
+  p <|> q = Parser $ \inp@(Input s l c r) -> case parse p inp of
                               Right r -> Right r
-                              Left e  -> case parse q inp of
-                                          Right r -> Right r
-                                          Left e' -> Left (merge_errs e e')
+                              Left e@(ParseError s' l' c' msgs)  -> 
+                                  case cmp_pair (l', c') (l, c) of
+                                     0  -> case parse q inp of
+                                            Right r -> Right r
+                                            Left e' -> Left (merge_errs e e')
+                                     _  -> Left e
 
 instance Monad Parser where
     p >>= f = Parser $ \inp -> case parse p inp of
                                 Left e          -> Left e
-                                Right (inp', a) -> parse (f a) inp'
+                                Right (inp', a) -> parse (spaces *> f a) inp'
 -- }}}
 --  +--------------------------------------------------+
 --  |                 Helper functions                 |
@@ -175,19 +178,26 @@ p <?> m = Parser $ \inp@(Input s l c a) ->
              Left (ParseError s l c msgs)  -> Left $ 
                  ParseError s l c $ Expected m : filter ((Expected "") /=) msgs
 
+try :: Parser a -> Parser a
+try p = Parser $ \inp -> case parse p inp of
+                           Right r -> Right r
+                           Left (ParseError _ _ _ msgs) -> Left $ ParseError s l c msgs
+                               where s = current inp
+                                     l = line inp
+                                     c = col inp
 
 -- If char satisfies input function, parse, otherwise Nothing
 sat :: (Char -> Bool) -> Parser Char
 sat f = Parser $ g
-    where g (Input s l c []) = Left $ ParseError s l c [Primitive "'end-of-file'"]
+    where g (Input s l c []) = Left $ ParseError s l c [Primitive "'end-of-input'"]
           g inp@(Input s l c a) = case f $ head a of
                                  True -> Right (incr inp, head a)
                                  False -> Left $ ParseError s l c [Primitive $ show $ head a]
 
 
 -- Attempts to parse with p, returns default value v otherwise
-optional :: Parser a -> a -> Parser a
-optional p v = Parser $ \inp -> case parse p inp of
+option :: Parser a -> a -> Parser a
+option p v = Parser $ \inp -> case parse p inp of
                                 Left e  -> Right (inp, v)
                                 Right r -> Right r
 
@@ -198,16 +208,45 @@ whilef f = many $ sat f
 -- Parse until function is satisfied
 untilf :: (Char -> Bool) -> Parser String
 untilf f = whilef (\x -> not $ f x)
+
+sep :: Parser a -> Parser b -> Parser [a]
+sep a b = do h <- a
+             t <- many (b >> a)
+             return $ h:t
+          <|> return []
+
+sep1 :: Parser a -> Parser b -> Parser [a]
+sep1 a b = (:) <$> a <*> (many $ b >> a)
+
+endwith :: Parser a -> Char -> Parser a
+endwith p c = p <* whilef notc <* char c
+    where notc x = (isSpace x) && (x /= c)
+
+notfollowedby :: Show a => Parser a -> Parser Char 
+notfollowedby p = Parser $ \inp@(Input s l c r) -> case parse p inp of
+                                     Right (_, t) -> Left $ (ParseError s l c [Primitive $ show t])
+                                     Left e -> Right (inp, ' ')
+
+untilc :: (Char -> Bool) -> Char -> Parser String
+untilc f c = whilef (\x -> f x && (x /= c))
+
+surround :: Char -> Char -> Parser b -> Parser b
+surround open close p = (spaces >> char open) *> p <* (spaces >> char close)
+
+parens :: Parser a -> Parser a
+parens p = surround '(' ')' p
+
 -- }}}
 --  +--------------------------------------------------+
 --  |                Parser primatives                 |
 --  +--------------------------------------------------+
 -- {{{
+--
 char :: Char -> Parser Char
-char ch = sat (==ch) 
+char ch = sat (==ch)
 
 string :: String -> Parser String
-string s = (sequenceA $ map char s) <?> show s
+string s = (sequence $ map char s) <?> show s
 
 digit :: Parser Char
 digit = sat isDigit
@@ -215,16 +254,28 @@ digit = sat isDigit
 alpha :: Parser Char
 alpha = sat isAlpha
 
+upper :: Parser Char
+upper = sat isUpper
+
+lower :: Parser Char
+lower = sat isLower
+
 alnum :: Parser Char
 alnum = sat isAlphaNum <?> "an alpha-numeric"
 
-space :: Parser Char
-space = sat isSpace
-
 spaces :: Parser String
-spaces = many space
+spaces = whilef isSpace
 
 name :: Parser String
-name = ((:) <$> alpha <*> many alnum) <?> "an identifier."
+name = (:) <$> alpha <*> many alnum <?> "an identifier."
+
+anychar :: Parser Char
+anychar = sat (\x -> True)
+
+eof :: Parser Char 
+eof = notfollowedby anychar <?> "'end-of-input'"
+
+newline :: Parser String
+newline = (untilc isSpace '\n' <* (char '\n' <|> eof )) <?> "a new line '\\n'"
 -- }}}
 
